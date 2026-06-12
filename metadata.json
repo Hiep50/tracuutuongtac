@@ -1,0 +1,8 @@
+{
+  "name": "Remix: Remix: Interaction Checker",
+  "description": "Phân tích tự động tương tác thuốc từ đơn thuốc hoặc bệnh án sử dụng AI.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
