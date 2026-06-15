@@ -143,6 +143,18 @@ export default function App() {
     dosage: "",
     frequency: ""
   });
+
+  // Local active upload sub-tab: "file" | "manual"
+  const [checkMode, setCheckMode] = useState<"file" | "manual">("file");
+  
+  // States for manual active ingredient check list
+  const [manualDrugs, setManualDrugs] = useState<Drug[]>([]);
+  const [manualNewDrug, setManualNewDrug] = useState<{ name: string; dosage: string; frequency: string }>({
+    name: "",
+    dosage: "",
+    frequency: ""
+  });
+  const [isCheckingManual, setIsCheckingManual] = useState(false);
   const [editingDrugIndex, setEditingDrugIndex] = useState<number | null>(null);
   const [editingDrug, setEditingDrug] = useState<{ name: string; dosage: string; frequency: string }>({
     name: "",
@@ -368,11 +380,9 @@ export default function App() {
             } else {
               if (resultJson.error) {
                 console.warn("Backend API error:", resultJson.error);
-                setApiErrorMessage(
-                  resultJson.quotaExceeded 
-                    ? "Tần suất kết nối Gemini API hiện đã đạt giới hạn (429 Quota Exceeded). Hệ thống đã chủ động kích hoạt Trình phân tích Lâm sàng Ngoại tuyến (Heuristic Simulation Parser) để quá trình kiểm tra thuốc của bạn diễn ra liền mạch."
-                    : resultJson.error
-                );
+                setApiErrorMessage(resultJson.error);
+              } else {
+                setApiErrorMessage("Trình phân tích đám mây phản hồi chậm. Đã chuyển kết quả rà soát sang Cơ sở lâm sàng ngoại tuyến.");
               }
             }
           } catch (backendError) {
@@ -437,10 +447,12 @@ export default function App() {
         }
         setApiErrorMessage(null);
         return json.data.interactions;
-      } else if (json.quotaExceeded) {
-        setApiErrorMessage(
-          "Tần suất gửi tin Gemini API hiện đã tối đa (429 Quota Exceeded). Báo cáo tương tác chéo hiện đã chuyển đồng bộ tự động tại chỗ về Cơ sở lâm sàng ngoại tuyến (Offline Pharmacology Heuristics) để tránh gián đoạn."
-        );
+      } else {
+        if (json.error) {
+          setApiErrorMessage(json.error);
+        } else {
+          setApiErrorMessage("Hệ thống kết nối đám mây bận. Đã chủ động chuyển đồng bộ kết quả Dược lý sang Cơ sở lâm sàng ngoại tuyến để tránh gián đoạn.");
+        }
       }
     } catch (e) {
       console.error("Backend interaction validator failed:", e);
@@ -492,6 +504,83 @@ export default function App() {
     }
 
     return results;
+  };
+
+  // Add an active ingredient manually to the draft manual list
+  const handleAddManualDrug = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!manualNewDrug.name.trim()) {
+      showToast("Vui lòng nhập tên hoạt chất.", "error");
+      return;
+    }
+
+    const added: Drug = {
+      name: manualNewDrug.name.trim(),
+      dosage: manualNewDrug.dosage.trim() || "Chưa rõ liều lượng",
+      frequency: manualNewDrug.frequency.trim() || "Theo chỉ định bác sĩ"
+    };
+
+    setManualDrugs([...manualDrugs, added]);
+    setManualNewDrug({ name: "", dosage: "", frequency: "" });
+    showToast(`Đã thêm hoạt chất: ${added.name}`, "success");
+  };
+
+  // Delete an active ingredient from the draft manual list
+  const handleDeleteManualDrug = (indexToDelete: number) => {
+    const updated = manualDrugs.filter((_, i) => i !== indexToDelete);
+    setManualDrugs(updated);
+  };
+
+  // Proceed with interaction check for the manual drug list
+  const handleProceedManualCheck = async () => {
+    if (manualDrugs.length === 0) {
+      showToast("Vui lòng thêm ít nhất 2 hoạt chất để kiểm tra tương tác.", "error");
+      return;
+    }
+
+    setIsCheckingManual(true);
+    setCheckPhase("scanning");
+    setScanningProgress(20);
+    setScanningStatusText("Khởi tạo danh sách hoạt chất nhập thủ công...");
+
+    const manualFileFakeName = `Đơn thuốc tự nhập - ${new Date().toLocaleDateString("vi-VN")}`;
+    setScanningFile({ name: manualFileFakeName, size: "Hồ sơ thủ công" });
+
+    // Sequential fake progress updates for beautiful UI alignment
+    setTimeout(() => {
+      setScanningProgress(60);
+      setScanningStatusText("Đang đối chiếu dược điển lâm sàng tại chỗ...");
+    }, 450);
+
+    setTimeout(async () => {
+      try {
+        setScanningProgress(90);
+        setScanningStatusText("Đang thực hiện giải thuật xác thực và lấy phản hồi của Gemini AI...");
+        const updatedAlerts = await updatedInteractionsFromBackend(manualDrugs);
+
+        const manualRecord: DocumentFile = {
+          id: "manual-" + Date.now(),
+          fileName: manualFileFakeName,
+          fileSize: "Bản nhập tay",
+          dateString: new Date().toLocaleDateString("vi-VN"),
+          status: "analyzed",
+          drugs: manualDrugs,
+          interactions: updatedAlerts
+        };
+
+        const updatedHistory = [manualRecord, ...historyList];
+        saveToHistory(updatedHistory);
+        setActiveRecord(manualRecord);
+        setCheckPhase("results");
+        showToast("Hoàn thành phân tích hoạt chất thủ công thành công!", "success");
+        setManualDrugs([]);
+      } catch (err) {
+        console.error("Manual check error:", err);
+        showToast("Đã xảy ra lỗi trong quá trình kiểm tra tương tác hoạt chất.", "error");
+      } finally {
+        setIsCheckingManual(false);
+      }
+    }, 950);
   };
 
   // Add a medication manually to the active record active list
@@ -804,59 +893,205 @@ export default function App() {
                   className="space-y-6"
                 >
                   {/* Phase header */}
-                  <div className="space-y-1">
-                    <h2 className="text-2xl font-bold text-white tracking-tight">Tải lên tài liệu</h2>
-                    <p className="text-[#c2c6d4] text-sm">
-                      Phân kích hoạt tương tác thuốc tự động từ đơn thuốc hoặc bệnh án y khoa của bạn.
-                    </p>
-                  </div>
-
-                  {/* Drop-zone Uploader element */}
-                  <div 
-                    id="drop-zone"
-                    onDragOver={handleDragOver}
-                    onDragLeave={handleDragLeave}
-                    onDrop={handleFileDrop}
-                    onClick={() => fileInputRef.current?.click()}
-                    className={`border-2 border-dashed rounded-2xl p-10 flex flex-col items-center justify-center gap-4 transition-all duration-300 cursor-pointer text-center group ${
-                      isDraggingOver 
-                        ? "border-[#acc7ff] bg-[#0056b3]/10" 
-                        : "border-[#424752]/30 bg-[#181c20]/80 hover:border-[#acc7ff]/50 hover:bg-[#1c2024]"
-                    }`}
-                  >
-                    <input 
-                      type="file" 
-                      ref={fileInputRef}
-                      onChange={handleFileSelect}
-                      accept=".pdf,image/*" 
-                      className="hidden" 
-                    />
-
-                    <div className="w-16 h-16 rounded-full bg-[#0056b3]/20 flex items-center justify-center text-[#acc7ff] mb-2 group-hover:scale-110 transition-transform duration-300">
-                      <UploadCloud className="w-8 h-8" />
-                    </div>
-
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#424752]/10 pb-4">
                     <div className="space-y-1">
-                      <p className="text-lg font-bold text-white tracking-tight">
-                        Kéo và thả tệp PDF vào đây
-                      </p>
-                      <p className="text-xs text-[#c2c6d4]/60">
-                        Hoặc nhấn để chọn tệp từ thiết bị của bạn
+                      <h2 className="text-2xl font-bold text-white tracking-tight">Kiểm tra tương tác</h2>
+                      <p className="text-[#c2c6d4] text-sm">
+                        Phân tích rủi ro tương tác chéo tự động bằng cách quét đơn thuốc hoặc nhập danh sách hoạt chất thủ công.
                       </p>
                     </div>
 
-                    <button 
-                      type="button"
-                      className="mt-2 bg-[#acc7ff] text-[#101418] px-6 py-2.5 rounded-xl font-bold text-xs flex items-center gap-2 active:scale-95 transition-all shadow-md hover:bg-[#acc7ff]/90"
-                    >
-                      <Plus className="w-4 h-4 text-[#101418]" />
-                      Chọn tệp tin
-                    </button>
-
-                    <p className="text-[11px] text-[#c2c6d4]/40 uppercase tracking-widest font-mono">
-                      HỖ TRỢ: PDF & HÌNH ẢNH (MAX 15MB)
-                    </p>
+                    {/* Clean segmented control tab switcher */}
+                    <div className="flex bg-[#181c20] p-1 rounded-xl border border-[#424752]/20 shrink-0 self-start sm:self-center">
+                      <button
+                        onClick={() => setCheckMode("file")}
+                        className={`py-1.5 px-3 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all outline-none ${
+                          checkMode === "file"
+                            ? "bg-[#0056b3] text-white shadow"
+                            : "text-[#c2c6d4]/50 hover:text-white"
+                        }`}
+                      >
+                        <UploadCloud className="w-3.5 h-3.5" />
+                        Quét tệp tin
+                      </button>
+                      <button
+                        onClick={() => setCheckMode("manual")}
+                        className={`py-1.5 px-3 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all outline-none ${
+                          checkMode === "manual"
+                            ? "bg-[#0056b3] text-white shadow"
+                            : "text-[#c2c6d4]/50 hover:text-white"
+                        }`}
+                      >
+                        <Pill className="w-3.5 h-3.5" />
+                        Nhập thủ công
+                      </button>
+                    </div>
                   </div>
+
+                  {checkMode === "file" ? (
+                    /* Drop-zone Uploader element */
+                    <div 
+                      id="drop-zone"
+                      onDragOver={handleDragOver}
+                      onDragLeave={handleDragLeave}
+                      onDrop={handleFileDrop}
+                      onClick={() => fileInputRef.current?.click()}
+                      className={`border-2 border-dashed rounded-2xl p-10 flex flex-col items-center justify-center gap-4 transition-all duration-300 cursor-pointer text-center group ${
+                        isDraggingOver 
+                          ? "border-[#acc7ff] bg-[#0056b3]/10" 
+                          : "border-[#424752]/30 bg-[#181c20]/80 hover:border-[#acc7ff]/50 hover:bg-[#1c2024]"
+                      }`}
+                    >
+                      <input 
+                        type="file" 
+                        ref={fileInputRef}
+                        onChange={handleFileSelect}
+                        accept=".pdf,image/*" 
+                        className="hidden" 
+                      />
+
+                      <div className="w-16 h-16 rounded-full bg-[#0056b3]/20 flex items-center justify-center text-[#acc7ff] mb-2 group-hover:scale-110 transition-transform duration-300">
+                        <UploadCloud className="w-8 h-8" />
+                      </div>
+
+                      <div className="space-y-1">
+                        <p className="text-lg font-bold text-white tracking-tight">
+                          Kéo và thả tệp PDF vào đây
+                        </p>
+                        <p className="text-xs text-[#c2c6d4]/60">
+                          Hoặc nhấn để chọn tệp từ thiết bị của bạn
+                        </p>
+                      </div>
+
+                      <button 
+                        type="button"
+                        className="mt-2 bg-[#acc7ff] text-[#101418] px-6 py-2.5 rounded-xl font-bold text-xs flex items-center gap-2 active:scale-95 transition-all shadow-md hover:bg-[#acc7ff]/90"
+                      >
+                        <Plus className="w-4 h-4 text-[#101418]" />
+                        Chọn tệp tin
+                      </button>
+
+                      <p className="text-[11px] text-[#c2c6d4]/40 uppercase tracking-widest font-mono">
+                        HỖ TRỢ: PDF & HÌNH ẢNH (MAX 15MB)
+                      </p>
+                    </div>
+                  ) : (
+                    /* Manual Ingredients Input Panel */
+                    <div className="space-y-6">
+                      <div className="bg-[#1c2024]/80 p-6 rounded-2xl border border-[#424752]/20 space-y-4">
+                        <div className="space-y-1">
+                          <h3 className="font-bold text-white text-sm">Nhập hoạt chất & thuốc muốn rà soát</h3>
+                          <p className="text-xs text-[#c2c6d4]/60">Điền tên các loại thuốc hoạt tính, sau đó hệ thống sẽ phân lượng tương tác và rủi ro sinh học lâm sàng.</p>
+                        </div>
+
+                        {/* Interactive Form */}
+                        <form onSubmit={handleAddManualDrug} className="grid grid-cols-1 md:grid-cols-12 gap-3 items-end bg-[#101418]/50 p-4 rounded-xl border border-[#424752]/10">
+                          <div className="md:col-span-11 grid grid-cols-1 sm:grid-cols-12 gap-3">
+                            <div className="sm:col-span-5 space-y-1">
+                              <label className="text-[10px] uppercase font-bold text-[#acc7ff] tracking-wider block">Tên hoạt chất / thuốc *</label>
+                              <input
+                                type="text"
+                                required
+                                placeholder="Ví dụ: Aspirin, Ibuprofen, Paracetamol..."
+                                value={manualNewDrug.name}
+                                onChange={(e) => setManualNewDrug({ ...manualNewDrug, name: e.target.value })}
+                                className="w-full bg-[#101418] border border-[#424752]/30 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-[#acc7ff]"
+                              />
+                            </div>
+                            <div className="sm:col-span-3 space-y-1">
+                              <label className="text-[10px] uppercase font-bold text-[#c2c6d4]/50 tracking-wider block">Liều lượng (tùy chọn)</label>
+                              <input
+                                type="text"
+                                placeholder="Ví dụ: 500mg, 10mg..."
+                                value={manualNewDrug.dosage}
+                                onChange={(e) => setManualNewDrug({ ...manualNewDrug, dosage: e.target.value })}
+                                className="w-full bg-[#101418] border border-[#424752]/30 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-[#acc7ff]"
+                              />
+                            </div>
+                            <div className="sm:col-span-4 space-y-1">
+                              <label className="text-[10px] uppercase font-bold text-[#c2c6d4]/50 tracking-wider block">Tần suất (tùy chọn)</label>
+                              <input
+                                type="text"
+                                placeholder="Ví dụ: 2 lần/ngày, tối..."
+                                value={manualNewDrug.frequency}
+                                onChange={(e) => setManualNewDrug({ ...manualNewDrug, frequency: e.target.value })}
+                                className="w-full bg-[#101418] border border-[#424752]/30 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-[#acc7ff]"
+                              />
+                            </div>
+                          </div>
+                          <div className="md:col-span-1">
+                            <button
+                              type="submit"
+                              className="w-full h-9 bg-[#acc7ff] hover:bg-opacity-95 text-[#101418] rounded-lg flex items-center justify-center transition-all active:scale-95 text-xs font-bold"
+                              title="Thêm vào danh sách"
+                            >
+                              Thêm
+                            </button>
+                          </div>
+                        </form>
+
+                        {/* List of currently entered drugs in this manual list */}
+                        <div className="space-y-3">
+                          <h4 className="text-xs font-bold text-white uppercase tracking-wider text-[#acc7ff]">Danh sách thuốc đã thêm ({manualDrugs.length})</h4>
+                          
+                          {manualDrugs.length > 0 ? (
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                              {manualDrugs.map((drug, index) => (
+                                <div key={index} className="bg-[#101418] p-3 rounded-xl border border-[#424752]/15 flex items-center justify-between group hover:border-[#acc7ff]/20 transition-all">
+                                  <div className="flex items-center gap-3 min-w-0 pr-2">
+                                    <div className="w-8 h-8 rounded-lg bg-[#acc7ff]/10 text-[#acc7ff] flex items-center justify-center shrink-0">
+                                      <Pill className="w-4 h-4" />
+                                    </div>
+                                    <div className="min-w-0">
+                                      <h5 className="text-xs font-bold text-white truncate">{drug.name}</h5>
+                                      <p className="text-[10px] text-[#c2c6d4]/50 truncate">{drug.dosage} • {drug.frequency}</p>
+                                    </div>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDeleteManualDrug(index)}
+                                    className="p-1.5 text-[#c2c6d4]/40 hover:text-red-400 rounded-lg hover:bg-[#1c2024] transition-all"
+                                  >
+                                    <X className="w-4 h-4" />
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="text-center py-10 border border-dashed border-[#424752]/20 rounded-xl bg-[#101418]/25">
+                              <Pill className="w-8 h-8 text-[#c2c6d4]/20 mx-auto mb-2" />
+                              <p className="text-xs text-[#c2c6d4]/40">Chưa có thuốc nào trong danh sách rà soát. Hãy nhập thông tin phía trên để bắt đầu.</p>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Main Interaction Check Trigger button */}
+                        {manualDrugs.length > 0 && (
+                          <div className="pt-2 flex justify-end">
+                            <button
+                              type="button"
+                              onClick={handleProceedManualCheck}
+                              className="bg-[#acc7ff] text-[#101418] font-bold text-sm px-6 py-2.5 rounded-xl hover:bg-[#acc7ff]/90 transition-all active:scale-95 flex items-center gap-2 shadow-lg shadow-[#acc7ff]/10"
+                            >
+                              <Sparkles className="w-4 h-4 animate-pulse text-[#101418]" />
+                              Kiểm tra tương tác ({manualDrugs.length})
+                            </button>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Informational Assistance */}
+                      <div className="bg-[#1c2024]/40 p-4 rounded-xl border border-[#424752]/10 flex gap-3">
+                        <Info className="w-5 h-5 text-[#acc7ff] shrink-0 mt-0.5" />
+                        <div className="space-y-1">
+                          <h4 className="text-xs font-bold text-white">Cách nhập hoạt chất hiệu quả</h4>
+                          <p className="text-xs text-[#c2c6d4]/70 leading-relaxed">
+                            Nên nhập tên hoạt chất chính (ví dụ: <strong>Aspirin</strong>, <strong>Paracetamol</strong>, <strong>Ibuprofen</strong>) thay vì tên thương mại, để bảo đảm rà soát lâm sàng với cơ sở tri thức y khoa có tính nhất quán cao nhất. Nhập tối thiểu 2 hoạt chất để đối soát chỉ định chéo.
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  )}
 
                   {/* Guidance Bento Boxes */}
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
